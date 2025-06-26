@@ -120,7 +120,7 @@ prev_positions = np.zeros(nInst, dtype=int)
 entry_prices = np.zeros(nInst)
 rollingPL = []
 
-def getMyPosition(prcSoFar):
+def getMyPosition_MACD(prcSoFar):
     global prev_positions, entry_prices, rollingPL
 
     nInst, nt = prcSoFar.shape
@@ -222,3 +222,120 @@ def update_dollar_target(prcSoFar):
         return 5000
         # Again, all these numbers that are hard coded can be changed, might need to hypertune them somewhat
 
+
+"""Z-score Reversion"""
+nInst = 50
+currentPos = np.zeros(nInst)
+rollingPL = []
+
+def getMyPosition_ZscoreReversion(prcSoFar):
+    global currentPos, rollingPL
+    (nInst, nt) = prcSoFar.shape
+
+    if nt < 21:
+        return np.zeros(nInst)
+
+    # Parameters
+    window = 20
+    z_threshold = 2.0
+    base_target = 5000
+
+    prices = prcSoFar[:, -1]
+    ma = np.mean(prcSoFar[:, -window:], axis=1)
+    std = np.std(prcSoFar[:, -window:], axis=1) + 1e-6
+    zscore = (prices - ma) / std
+
+    # Estimate PnL and update PL history
+    if nt >= 2:
+        pnl = np.sum((prcSoFar[:, -1] - prcSoFar[:, -2]) * currentPos)
+        rollingPL.append(pnl)
+        if len(rollingPL) > 10:
+            rollingPL = rollingPL[-10:]
+
+    # Sharpe-based dollar target scaling (anti-martingale)
+    dollar_target = base_target
+    if len(rollingPL) >= 5:
+        mu = np.mean(rollingPL)
+        sigma = np.std(rollingPL) + 1e-6
+        sharpe = mu / sigma
+        if sharpe > 1.0:
+            dollar_target = 7000
+        elif sharpe < -0.5:
+            dollar_target = 3000
+
+    # Generate position: short if z > +2, long if z < -2
+    positions = np.zeros(nInst)
+    for i in range(nInst):
+        if zscore[i] < -z_threshold:
+            positions[i] = dollar_target / prices[i]  # Long
+        elif zscore[i] > z_threshold:
+            positions[i] = -dollar_target / prices[i]  # Short
+        else:
+            positions[i] = currentPos[i]  # Hold
+
+    currentPos = np.round(positions).astype(int)
+    return currentPos
+
+
+"""Hybrid Approach of Above"""
+nInst = 50
+currentPos = np.zeros(nInst)
+rollingPL = []
+
+def getMyPosition_HybridCrossSectionalMomentumRiskAdjustment_AntiMartingale(prcSoFar):
+    global currentPos, rollingPL
+
+    nInst, nt = prcSoFar.shape
+    if nt < 21:
+        return np.zeros(nInst)
+
+    # Parameters
+    short_window = 5
+    long_window = 20
+    base_dollar_target = 4000
+    signal_threshold = 0.2
+
+    short_ma = np.mean(prcSoFar[:, -short_window:], axis=1)
+    long_ma = np.mean(prcSoFar[:, -long_window:], axis=1)
+    trend_signal = short_ma - long_ma
+
+    returns = prcSoFar[:, -1] / prcSoFar[:, -20] - 1
+    momentum_score = returns - np.mean(returns)
+
+    # Combined - trend-filtered momentum
+    signal = trend_signal * momentum_score
+
+
+    volatility = np.std(prcSoFar[:, -long_window:], axis=1) + 1e-6
+    signal /= volatility
+
+    # Ignore weak signals
+    signal[np.abs(signal) < signal_threshold] = 0
+
+    # Anti-Martingale 
+    if nt >= 2:
+        pnl = np.sum((prcSoFar[:, -1] - prcSoFar[:, -2]) * currentPos)
+        rollingPL.append(pnl)
+        if len(rollingPL) > 10:
+            rollingPL = rollingPL[-10:]
+
+    dollar_target = base_dollar_target
+    if len(rollingPL) >= 5:
+        mu = np.mean(rollingPL)
+        sigma = np.std(rollingPL) + 1e-6
+        sharpe = mu / sigma
+        if sharpe > 1.0:
+            dollar_target = 6000
+        elif sharpe < -0.5:
+            dollar_target = 2000
+
+    # Position Sizing
+    prices = prcSoFar[:, -1]
+    raw_pos = dollar_target * signal / prices
+
+    # Cap based on $10k limit per asset
+    cap = 10000 / prices
+    raw_pos = np.clip(raw_pos, -cap, cap)
+
+    currentPos = np.round(raw_pos).astype(int)
+    return currentPos
